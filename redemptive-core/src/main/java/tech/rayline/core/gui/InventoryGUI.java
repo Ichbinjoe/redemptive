@@ -1,24 +1,20 @@
 package tech.rayline.core.gui;
 
 import com.google.common.collect.ImmutableList;
-
+import com.google.common.collect.ImmutableSet;
 import org.bukkit.Bukkit;
 import org.bukkit.Sound;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
-
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.Set;
-import java.util.UUID;
-
+import org.bukkit.inventory.PlayerInventory;
 import rx.Observable;
 import rx.Subscriber;
 import rx.Subscription;
@@ -31,12 +27,15 @@ import tech.rayline.core.command.EmptyHandlerException;
 import tech.rayline.core.plugin.RedemptivePlugin;
 import tech.rayline.core.util.SoundUtil;
 
+import java.util.*;
+import java.util.concurrent.TimeUnit;
+
 /**
  * This class represents an InventoryGUI which can be opened for players
  *
  * @version 2.0
  */
-public class InventoryGUI {
+public class InventoryGUI implements InventoryHolder {
     /**
      * A collection of all the players who currently have the inventory GUI open
      */
@@ -74,7 +73,7 @@ public class InventoryGUI {
         if (type == InventoryType.CHEST)
             throw new IllegalArgumentException("You must use the constructor accepting an integer, not InventoryType, if you wish to create a standard chest inventory!");
 
-        bukkitInventory = Bukkit.createInventory(null, type, title);
+        bukkitInventory = Bukkit.createInventory(this, type, title);
         mainSubscription = beginObserving();
     }
 
@@ -86,7 +85,7 @@ public class InventoryGUI {
      */
     public InventoryGUI(RedemptivePlugin plugin, int size, String title) {
         this.plugin = plugin;
-        bukkitInventory = Bukkit.createInventory(null, size, title);
+        bukkitInventory = Bukkit.createInventory(this, size, title);
         mainSubscription = beginObserving();
     }
 
@@ -97,19 +96,25 @@ public class InventoryGUI {
         //noinspection SuspiciousMethodCalls
         subscription.add(
                 //this is the main subscription that we use to actually catch clicks
-                plugin.observeEvent(InventoryClickEvent.class)
+                plugin.observeEvent(EventPriority.LOWEST, InventoryClickEvent.class)
                 .filter(new Func1<InventoryClickEvent, Boolean>() {
                     @Override
                     public Boolean call(InventoryClickEvent event) {
                         //noinspection SuspiciousMethodCalls
-                        return event.getInventory().getTitle().equals(bukkitInventory.getTitle()) && observers.contains(event.getWhoClicked().getUniqueId());
+                        return event.getInventory().equals(bukkitInventory) && observers.contains(event.getWhoClicked().getUniqueId());
                     }
                 })
+                .map(new Func1<InventoryClickEvent, InventoryClickEvent>() {
+                    @Override
+                    public InventoryClickEvent call(InventoryClickEvent inventoryClickEvent) {
+                        inventoryClickEvent.setCancelled(true);
+                        return inventoryClickEvent;
+                    }
+                })
+                .delay(100, TimeUnit.MILLISECONDS, plugin.getSyncScheduler())
                 .subscribe(new Action1<InventoryClickEvent>() {
                     @Override
                     public void call(InventoryClickEvent event) {
-                        event.setCancelled(true);
-
                         try {
                             InventoryGUIButton buttonAt = getButtonAt(event.getRawSlot());
                             if (buttonAt == null)
@@ -120,13 +125,34 @@ public class InventoryGUI {
                                 buttonAt.onPlayerClick(whoClicked, ClickAction.from(event.getClick()));
                                 whoClicked.updateInventory();
                             } catch (EmptyHandlerException e) {
-                                SoundUtil.playTo(whoClicked, Sound.BLOCK_NOTE_PLING);
+                                SoundUtil.playTo(whoClicked, Sound.NOTE_PLING);
                             }
                         } catch (Exception e) {
                             e.printStackTrace();
                         }
                     }
                 }));
+        subscription.add(
+                plugin.observeEvent(EventPriority.LOWEST, InventoryMoveItemEvent.class)
+                .filter(new Func1<InventoryMoveItemEvent, Boolean>() {
+                    @Override
+                    public Boolean call(InventoryMoveItemEvent event) {
+                        return checkInv(event.getInitiator()) || checkInv(event.getDestination());
+                    }
+
+                    private boolean checkInv(Inventory inventory) {
+                        return (inventory instanceof PlayerInventory
+                                && observers.contains(((PlayerInventory) inventory).getHolder().getUniqueId()))
+                                || inventory.equals(bukkitInventory);
+                    }
+                })
+                .subscribe(new Action1<InventoryMoveItemEvent>() {
+                    @Override
+                    public void call(InventoryMoveItemEvent event) {
+                        event.setCancelled(true);
+                    }
+                })
+        );
 
         return subscription;
     }
@@ -168,15 +194,13 @@ public class InventoryGUI {
     /**
      * This will force the inventory to fall out of scope by clearing and un-subscribing various things
      */
-
-
     public void invalidate() {
         mainSubscription.unsubscribe();
         for (UUID observer : observers)
             Bukkit.getPlayer(observer).closeInventory();
         observers.clear();
         touchedSlots.clear();
-        for (Integer integer : buttons.keySet())
+        for (Integer integer : new HashSet<>(buttons.keySet()))
             clearButton(integer);
     }
 
@@ -263,7 +287,9 @@ public class InventoryGUI {
         if (mainSubscription.isUnsubscribed())
             throw new IllegalStateException("You cannot use this inventory anymore! You have invalidated it!");
 
+        player.openInventory(bukkitInventory);
         observers.add(player.getUniqueId());
+        updateInventory();
         //listens to the player quit event and the inventory close event
         Observable.merge(
                 plugin.observeEvent(PlayerQuitEvent.class).map(new Func1<PlayerQuitEvent, Player>() {
@@ -272,7 +298,8 @@ public class InventoryGUI {
                         return playerQuitEvent.getPlayer();
                     }
                 }),
-                plugin.observeEvent(InventoryCloseEvent.class).map(new Func1<InventoryCloseEvent, Player>() {
+                plugin.observeEvent(EventPriority.MONITOR, InventoryCloseEvent.class)
+                .map(new Func1<InventoryCloseEvent, Player>() {
                     @Override
                     public Player call(InventoryCloseEvent inventoryCloseEvent) {
                         return (Player) inventoryCloseEvent.getPlayer();
@@ -282,7 +309,7 @@ public class InventoryGUI {
                 .filter(new Func1<Player, Boolean>() {
                     @Override
                     public Boolean call(Player pl) {
-                        return pl.equals(player);
+                        return pl.getUniqueId().equals(player.getUniqueId());
                     }
                 })
                 //only take one, and only while the player still has the inventory open
@@ -300,9 +327,6 @@ public class InventoryGUI {
                         inventoryClosed(player);
                     }
                 });
-
-        //open the inventory
-        player.openInventory(bukkitInventory);
     }
 
     public boolean isOpenFor(Player player) {
@@ -324,6 +348,9 @@ public class InventoryGUI {
     //removes players from the observable set now that they've closed the inventory
     protected void inventoryClosed(Player player) {
         observers.remove(player.getUniqueId());
+        if (observers.size() == 0 && !mainSubscription.isUnsubscribed())  {
+            invalidate();
+        }
     }
 
     //used to mark a slot for update
@@ -358,5 +385,21 @@ public class InventoryGUI {
                 return i;
         }
         throw new ArrayIndexOutOfBoundsException("There are no more slots in the inventory!");
+    }
+
+    public Collection<UUID> getObservers() {
+        return ImmutableSet.copyOf(observers);
+    }
+
+    @Override
+    public Inventory getInventory() {
+        return bukkitInventory;
+    }
+
+    @Override
+    protected void finalize() throws Throwable {
+        super.finalize();
+        if (observers.size() == 0 && !mainSubscription.isUnsubscribed())
+            invalidate();
     }
 }

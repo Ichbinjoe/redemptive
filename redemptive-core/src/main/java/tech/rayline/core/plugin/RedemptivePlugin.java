@@ -8,6 +8,9 @@ import org.bukkit.command.PluginCommand;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.PluginManager;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -15,6 +18,8 @@ import rx.Observable;
 import tech.rayline.core.command.CommandMeta;
 import tech.rayline.core.command.RDCommand;
 import tech.rayline.core.inject.Injector;
+import tech.rayline.core.jsonchat.JsonMessageFormatter;
+import tech.rayline.core.jsonchat.XmlJsonChatConverter;
 import tech.rayline.core.library.LibraryHandler;
 import tech.rayline.core.library.MavenLibraries;
 import tech.rayline.core.library.MavenLibrary;
@@ -26,6 +31,8 @@ import tech.rayline.core.rx.EventStreamer;
 import tech.rayline.core.rx.PeriodicPlayerStreamer;
 import tech.rayline.core.rx.RxBukkitScheduler;
 
+import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.util.Arrays;
@@ -42,16 +49,22 @@ public abstract class RedemptivePlugin extends JavaPlugin {
     private PeriodicPlayerStreamer playerStreamer;
     private ResourceFileGraph resourceFileGraph;
 
-    @ResourceFile(raw = true, filename = "formats.yml") @ReadOnlyResource private YAMLConfigurationFile formatsFile;
+    @ResourceFile(raw = true, filename = "formats.yml")
+    @ReadOnlyResource
+    private YAMLConfigurationFile formatsFile;
 
-    @Getter(AccessLevel.NONE) private Object[] injected;
+    @Getter(AccessLevel.NONE)
+    private Object[] injected;
 
     //"abstract" methods
-    protected void onModuleEnable() throws Exception {}
-    protected void onModuleDisable() throws Exception {}
+    protected void onModuleEnable() throws Exception {
+    }
+
+    protected void onModuleDisable() throws Exception {
+    }
 
     @Override
-    public  void onLoad() {
+    public void onLoad() {
         //get libraries, first and foremost
         LibraryHandler.loadLibraries(this);
     }
@@ -111,6 +124,25 @@ public abstract class RedemptivePlugin extends JavaPlugin {
         return getFormatter().begin(key);
     }
 
+    public final JsonMessageFormatter xmlFormatWith(InputStream stream) {
+        return new JsonMessageFormatter(stream);
+    }
+
+    public final JsonMessageFormatter xmlFromResouce(String resourceName) {
+        return xmlFormatWith(getResource(resourceName));
+    }
+
+    public final JsonMessageFormatter xmlFromFormatsFile(String path) {
+        String string = formatsFile.getConfig().getString(path);
+        if (string == null)
+            throw new IllegalArgumentException("JSON message could not be found in formats.yml");
+        return xmlFormatFromString(string);
+    }
+
+    public final JsonMessageFormatter xmlFormatFromString(String xml) {
+        return xmlFormatWith(XmlJsonChatConverter.streamFrom(xml));
+    }
+
     public void saveAll() {
         resourceFileGraph.saveAll();
     }
@@ -165,7 +197,8 @@ public abstract class RedemptivePlugin extends JavaPlugin {
         return command;
     }
 
-    @Deprecated public final void regsiterCommand(RDCommand... commands) {
+    @Deprecated
+    public final void regsiterCommand(RDCommand... commands) {
         for (RDCommand command : commands) registerCommand(command);
     }
 
