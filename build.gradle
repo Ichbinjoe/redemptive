@@ -4,6 +4,19 @@ version '1.1.1-SNAPSHOT'
 subprojects {
 	apply plugin: 'maven-publish'
 	publishing {
+        repositories {
+            maven {
+                name 'parallelblock'
+				if (version.endsWith("-SNAPSHOT"))
+                    url 'https://repo.parallelblock.com/repository/maven-snapshots/'
+				else
+					url 'https://repo.parallelblock.com/repository/maven-releases/'
+                credentials {
+                    username "$System.env.DEPLOY_USER"
+                    password "$System.env.DEPLOY_PASS"
+                }
+            }
+        }
 		publications {
 			mavenCustom(MavenPublication) {
 				from components.java
